@@ -55,7 +55,16 @@ public:
     _Mode_e ticMode;
     bool triphase;
 
+    // stability: timestamp of the last complete TIC frame, and whether one was seen since init
+    unsigned long ts_lastFrame;
+    bool frameSeen;
+    bool mqttConnected();
+
 private:
+    // timestamp of the last MQTT connection attempt from SendData (throttled reconnection)
+    unsigned long ts_lastMqttConnectAttempt;
+    bool connectMqttThrottled();
+
     char logBuffer[100];
     char mqtt_user[32];
     char mqtt_pwd[32];

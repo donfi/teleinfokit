@@ -160,6 +160,11 @@ unsigned long ts_last_wifi_check = 0;
 int wifi_reconnect_try_count = 0;
 bool wifi_config_saved_during_portal = false;
 
+// stability watchdogs: restart if TIC frames stop being decoded, or if MQTT stays down while WiFi is up
+#define TIC_STALL_RESTART_MS (2UL * 60UL * 1000UL)  // 2 minutes without a complete TIC frame
+#define MQTT_DOWN_RESTART_MS (5UL * 60UL * 1000UL)  // 5 minutes without MQTT connection
+unsigned long ts_mqtt_ok = 0;
+
 // #REGION WifiManager ==================================
 WiFiManager wm;
 
@@ -512,6 +517,8 @@ void handlerBtn(Button2 &btn)
 void setup()
 {
   WiFi.mode(WIFI_STA); // explicitly set mode, esp defaults to STA+AP
+  // mains powered: disable modem sleep, which causes packet loss and disconnects with some access points
+  WiFi.setSleepMode(WIFI_NONE_SLEEP);
   data = new Data();
   randKey = new RandomKeyGenerator();
   d = new Display();
@@ -642,6 +649,8 @@ void setup()
       ESP.reset();
       delay(1000);
     }
+    // WiFiManager may change the WiFi mode during connection, so apply the sleep mode again
+    WiFi.setSleepMode(WIFI_NONE_SLEEP);
     d->logPercent("Connecté à " + String(WiFi.SSID()), 40);
 
     // /#REGION WifiManager ==================================
@@ -903,6 +912,27 @@ void loop()
     }
   }
   ti.loop();
+
+  if (!test_mode)
+  {
+    // TIC watchdog: frames were being decoded, then stopped
+    if (ti.frameSeen && millis() - ti.ts_lastFrame > TIC_STALL_RESTART_MS)
+    {
+      d->log("Plus de trame TIC\nRedemarrage", 1000);
+      ESP.restart();
+    }
+
+    // MQTT watchdog: WiFi is up but the broker connection could not be restored
+    if (config.mqtt_server[0] == '\0' || WiFi.status() != WL_CONNECTED || ti.mqttConnected())
+    {
+      ts_mqtt_ok = millis();
+    }
+    else if (millis() - ts_mqtt_ok > MQTT_DOWN_RESTART_MS)
+    {
+      d->log("MQTT deconnecte\nRedemarrage", 1000);
+      ESP.restart();
+    }
+  }
 
   // update time every 5 minutes
   if (millis() - mtime > 5 * 60 * 1000)

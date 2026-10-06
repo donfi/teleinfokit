@@ -21,11 +21,21 @@ ESPTeleInfo::ESPTeleInfo()
     maxPapp = 0;
     ts_maxPapp = 0;
     started = false;
+    ts_lastFrame = 0;
+    frameSeen = false;
+    ts_lastMqttConnectAttempt = 0;
 }
 
 static void DataCallback(ValueList *me, uint8_t flags)
 {
     getESPTeleInfo()->SetData(me->name, me->value);
+}
+
+// called by LibTeleinfo at the end of each complete, valid frame (changed or not)
+static void FrameCallback(ValueList *me)
+{
+    getESPTeleInfo()->ts_lastFrame = millis();
+    getESPTeleInfo()->frameSeen = true;
 }
 
 void ESPTeleInfo::init(_Mode_e tic_mode, bool triphase)
@@ -51,6 +61,10 @@ void ESPTeleInfo::init(_Mode_e tic_mode, bool triphase)
     // Init teleinfo
     teleinfo.init(tic_mode);
     teleinfo.attachData(DataCallback);
+    teleinfo.attachNewFrame(FrameCallback);
+    teleinfo.attachUpdatedFrame(FrameCallback);
+    ts_lastFrame = millis();
+    frameSeen = false;
 
     delay(1000);
     if (Serial.available())
@@ -80,6 +94,27 @@ bool ESPTeleInfo::connectMqtt()
     {
         return mqttClient.connect(UNIQUE_ID, mqtt_user, mqtt_pwd);
     }
+}
+
+bool ESPTeleInfo::mqttConnected()
+{
+    return mqttClient.connected();
+}
+
+// Used for data publishing: while the broker is unreachable, a blocking connection attempt for
+// every changed label stalls the main loop and makes the serial buffer overflow. Retry at most every 5 s.
+bool ESPTeleInfo::connectMqttThrottled()
+{
+    if (mqttClient.connected())
+    {
+        return true;
+    }
+    if (ts_lastMqttConnectAttempt != 0 && millis() - ts_lastMqttConnectAttempt < 5000)
+    {
+        return false;
+    }
+    ts_lastMqttConnectAttempt = millis();
+    return connectMqtt();
 }
 
 void ESPTeleInfo::AnalyzeTicForInternalData()
@@ -211,7 +246,7 @@ void ESPTeleInfo::SendData(char *label, char *value)
         return;
     }
     // send all data in the data topic
-    if (connectMqtt())
+    if (connectMqttThrottled())
     {
         // sanitize the label to remove spaces and special characters
         String sanitizedLabel = sanitizeLabel(String(label));
@@ -237,10 +272,16 @@ void ESPTeleInfo::loop(void)
         ts_startup = millis();
     }
 
-    if (Serial.available())
+    // read every waiting byte, not just one per loop, so the serial buffer cannot fall behind
+    bool gotData = false;
+    while (Serial.available())
     {
         teleinfo.process(Serial.read());
+        gotData = true;
+    }
 
+    if (gotData)
+    {
         if (millis() - ts_analyzeData > 1000)
         {
             AnalyzeTicForInternalData();
@@ -300,6 +341,8 @@ bool ESPTeleInfo::LogStartup()
         strcpy(str, "MAC: ");
         strcat(str, WiFi.macAddress().c_str());
         Log(str);
+        // why the previous run ended (e.g. "Software/System restart" after a watchdog restart)
+        Log("Reset reason: " + ESP.getResetReason());
         return true;
     }
     else
@@ -324,7 +367,7 @@ void ESPTeleInfo::Log(String s)
     }
     if (nbTry < NBTRY)
     {
-        s.toCharArray(logBuffer, 200);
+        s.toCharArray(logBuffer, sizeof(logBuffer)); // was 200, larger than the 100-byte buffer
         mqttClient.publish(bufLogTopic, logBuffer);
     }
 }
