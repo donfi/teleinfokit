@@ -24,6 +24,8 @@ ESPTeleInfo::ESPTeleInfo()
     ts_lastFrame = 0;
     frameSeen = false;
     ts_lastMqttConnectAttempt = 0;
+    frameCount = 0;
+    mqttReconnects = 0;
 }
 
 static void DataCallback(ValueList *me, uint8_t flags)
@@ -36,6 +38,7 @@ static void FrameCallback(ValueList *me)
 {
     getESPTeleInfo()->ts_lastFrame = millis();
     getESPTeleInfo()->frameSeen = true;
+    getESPTeleInfo()->frameCount++;
 }
 
 void ESPTeleInfo::init(_Mode_e tic_mode, bool triphase)
@@ -114,7 +117,23 @@ bool ESPTeleInfo::connectMqttThrottled()
         return false;
     }
     ts_lastMqttConnectAttempt = millis();
-    return connectMqtt();
+    bool ok = connectMqtt();
+    if (ok)
+    {
+        mqttReconnects++;
+    }
+    return ok;
+}
+
+bool ESPTeleInfo::PublishStatus(const char *json)
+{
+    if (!mqttClient.connected())
+    {
+        return false;
+    }
+    char topic[45];
+    snprintf(topic, sizeof(topic), "%s/status", UNIQUE_ID);
+    return mqttClient.publish(topic, json, false);
 }
 
 void ESPTeleInfo::AnalyzeTicForInternalData()

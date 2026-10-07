@@ -60,6 +60,12 @@ public:
     bool frameSeen;
     bool mqttConnected();
 
+    // diagnostics: complete TIC frames decoded and MQTT reconnections since the last status report
+    unsigned long frameCount;
+    unsigned long mqttReconnects;
+    // publishes a JSON status payload on <UNIQUE_ID>/status (not retained), only if MQTT is connected
+    bool PublishStatus(const char *json);
+
 private:
     // timestamp of the last MQTT connection attempt from SendData (throttled reconnection)
     unsigned long ts_lastMqttConnectAttempt;

@@ -165,6 +165,15 @@ bool wifi_config_saved_during_portal = false;
 #define MQTT_DOWN_RESTART_MS (5UL * 60UL * 1000UL)  // 5 minutes without MQTT connection
 unsigned long ts_mqtt_ok = 0;
 
+// diagnostics heartbeat: status JSON every 5 minutes (first one 1 minute after boot)
+#define STATUS_PERIOD_MS (5UL * 60UL * 1000UL)
+#define STATUS_FIRST_MS (60UL * 1000UL)
+unsigned long ts_status = 0;
+bool status_sent_once = false;
+unsigned long max_loop_ms = 0;    // longest loop() pass since the last status report
+unsigned long wifi_drops = 0;     // WiFi connected -> not connected transitions since boot
+bool wifi_was_connected = false;
+
 // #REGION WifiManager ==================================
 WiFiManager wm;
 
@@ -752,8 +761,25 @@ void setup()
   ti.loop();
 }
 
+void sendStatus()
+{
+  char json[220];
+  snprintf(json, sizeof(json),
+           "{\"rssi\":%d,\"bssid\":\"%s\",\"ch\":%d,\"up\":%lu,\"heap\":%u,\"frag\":%u,\"maxloop\":%lu,\"frames\":%lu,\"mqtt_reconn\":%lu,\"wifi_drops\":%lu}",
+           WiFi.RSSI(), WiFi.BSSIDstr().c_str(), WiFi.channel(), millis() / 1000, ESP.getFreeHeap(), ESP.getHeapFragmentation(),
+           max_loop_ms, ti.frameCount, ti.mqttReconnects, wifi_drops);
+  if (ti.PublishStatus(json))
+  {
+    // counters are per reporting period, except uptime and wifi_drops
+    max_loop_ms = 0;
+    ti.frameCount = 0;
+    ti.mqttReconnects = 0;
+  }
+}
+
 void loop()
 {
+  unsigned long loop_start = millis();
   ArduinoOTA.handle();
   button.loop();
   wm.process();
@@ -932,6 +958,21 @@ void loop()
       d->log("MQTT deconnecte\nRedemarrage", 1000);
       ESP.restart();
     }
+
+    // diagnostics heartbeat
+    bool wifi_connected = WiFi.status() == WL_CONNECTED;
+    if (wifi_was_connected && !wifi_connected)
+    {
+      wifi_drops++;
+    }
+    wifi_was_connected = wifi_connected;
+
+    if ((!status_sent_once && millis() > STATUS_FIRST_MS) || (status_sent_once && millis() - ts_status > STATUS_PERIOD_MS))
+    {
+      sendStatus();
+      ts_status = millis();
+      status_sent_once = true;
+    }
   }
 
   // update time every 5 minutes
@@ -942,6 +983,12 @@ void loop()
       d->getTime();
     }
     mtime = millis();
+  }
+
+  unsigned long loop_ms = millis() - loop_start;
+  if (loop_ms > max_loop_ms)
+  {
+    max_loop_ms = loop_ms;
   }
 }
 
