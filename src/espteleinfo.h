@@ -5,6 +5,15 @@
 #define DATA_MAX_SIZE 200
 #define NBTRY 5
 
+// PubSubClient sends a PINGREQ after this many seconds without inbound traffic and drops the
+// session if the PINGRESP has not arrived one period later. The library default (15 s) is too
+// short for a lossy link: we only receive PINGRESPs, so every lost one ended the session.
+#define MQTT_KEEPALIVE_S 60
+// large enough for the status JSON (topic + payload) and the data messages
+#define MQTT_BUFFER_SIZE 384
+// at 1200 baud, 1024 bytes hold about 8 s of TIC data while the loop is blocked (e.g. reconnecting)
+#define TIC_RX_BUFFER_SIZE 1024
+
 #include <ESP8266WiFi.h>
 #include <LibTeleinfo.h>
 #include <PubSubClient.h>
@@ -60,9 +69,13 @@ public:
     bool frameSeen;
     bool mqttConnected();
 
-    // diagnostics: complete TIC frames decoded and MQTT reconnections since the last status report
+    // diagnostics: complete TIC frames decoded, MQTT reconnections and disconnections since the
+    // last status report, and the PubSubClient state() code at the last disconnection
+    // (-4 keepalive timeout, -3 connection lost, -2 connect failed, -1 disconnected)
     unsigned long frameCount;
     unsigned long mqttReconnects;
+    unsigned long mqttDisconnects;
+    int mqttLastState;
     // publishes a JSON status payload on <UNIQUE_ID>/status (not retained), only if MQTT is connected
     bool PublishStatus(const char *json);
 
@@ -70,6 +83,8 @@ private:
     // timestamp of the last MQTT connection attempt from SendData (throttled reconnection)
     unsigned long ts_lastMqttConnectAttempt;
     bool connectMqttThrottled();
+    // MQTT connection state at the previous loop, to count disconnections
+    bool mqttWasConnected;
 
     char logBuffer[100];
     char mqtt_user[32];

@@ -162,14 +162,27 @@ bool wifi_config_saved_during_portal = false;
 
 // stability watchdogs: restart if TIC frames stop being decoded, or if MQTT stays down while WiFi is up
 #define TIC_STALL_RESTART_MS (2UL * 60UL * 1000UL)  // 2 minutes without a complete TIC frame
-#define MQTT_DOWN_RESTART_MS (5UL * 60UL * 1000UL)  // 5 minutes without MQTT connection
+// 3 minutes without MQTT connection: shorter than Home Assistant's 5-minute stall power-cycle,
+// so the firmware gets the first chance to recover
+#define MQTT_DOWN_RESTART_MS (3UL * 60UL * 1000UL)
 unsigned long ts_mqtt_ok = 0;
 
-// diagnostics heartbeat: status JSON every 5 minutes (first one 1 minute after boot)
+// which watchdog restarted the ESP, kept in RTC user memory across ESP.restart() and logged at
+// the next startup. The first 128 bytes (32 blocks) of RTC user memory are reserved for OTA.
+#define RTC_RESTART_REASON_OFFSET 64
+#define RTC_RESTART_MAGIC 0x54494B57 // "TIKW"
+#define RESTART_REASON_TIC_STALL 1
+#define RESTART_REASON_MQTT_DOWN 2
+
+// diagnostics heartbeat: status JSON every 5 minutes (first one 1 minute after boot).
+// If MQTT is down when one is due, retry every 10 s instead of skipping a whole period.
 #define STATUS_PERIOD_MS (5UL * 60UL * 1000UL)
 #define STATUS_FIRST_MS (60UL * 1000UL)
-unsigned long ts_status = 0;
-bool status_sent_once = false;
+#define STATUS_RETRY_MS (10UL * 1000UL)
+unsigned long ts_status_due = STATUS_FIRST_MS;
+bool sendStatus();
+void restartWithReason(uint32_t reason);
+void logWatchdogRestart();
 unsigned long max_loop_ms = 0;    // longest loop() pass since the last status report
 unsigned long wifi_drops = 0;     // WiFi connected -> not connected transitions since boot
 bool wifi_was_connected = false;
@@ -741,6 +754,10 @@ void setup()
     }
     else
     {
+      if (config.mqtt_server[0] != '\0')
+      {
+        logWatchdogRestart();
+      }
       d->logPercent("Envoi MQTT Discovery", 80);
     }
 
@@ -761,20 +778,50 @@ void setup()
   ti.loop();
 }
 
-void sendStatus()
+bool sendStatus()
 {
-  char json[220];
+  char json[300];
   snprintf(json, sizeof(json),
-           "{\"rssi\":%d,\"bssid\":\"%s\",\"ch\":%d,\"up\":%lu,\"heap\":%u,\"frag\":%u,\"maxloop\":%lu,\"frames\":%lu,\"mqtt_reconn\":%lu,\"wifi_drops\":%lu}",
+           "{\"rssi\":%d,\"bssid\":\"%s\",\"ch\":%d,\"up\":%lu,\"heap\":%u,\"frag\":%u,\"maxloop\":%lu,\"frames\":%lu,\"mqtt_reconn\":%lu,\"mqtt_disc\":%lu,\"mqtt_state\":%d,\"wifi_drops\":%lu}",
            WiFi.RSSI(), WiFi.BSSIDstr().c_str(), WiFi.channel(), millis() / 1000, ESP.getFreeHeap(), ESP.getHeapFragmentation(),
-           max_loop_ms, ti.frameCount, ti.mqttReconnects, wifi_drops);
+           max_loop_ms, ti.frameCount, ti.mqttReconnects, ti.mqttDisconnects, ti.mqttLastState, wifi_drops);
   if (ti.PublishStatus(json))
   {
-    // counters are per reporting period, except uptime and wifi_drops
+    // counters are per reporting period, except uptime, wifi_drops and the last disconnection state
     max_loop_ms = 0;
     ti.frameCount = 0;
     ti.mqttReconnects = 0;
+    ti.mqttDisconnects = 0;
+    return true;
   }
+  return false;
+}
+
+void restartWithReason(uint32_t reason)
+{
+  uint32_t rtc[2] = {RTC_RESTART_MAGIC, reason};
+  ESP.rtcUserMemoryWrite(RTC_RESTART_REASON_OFFSET, rtc, sizeof(rtc));
+  ESP.restart();
+}
+
+// logs which watchdog caused the previous restart, if any, then clears the record
+void logWatchdogRestart()
+{
+  uint32_t rtc[2] = {0, 0};
+  if (!ESP.rtcUserMemoryRead(RTC_RESTART_REASON_OFFSET, rtc, sizeof(rtc)) || rtc[0] != RTC_RESTART_MAGIC)
+  {
+    return;
+  }
+  if (rtc[1] == RESTART_REASON_TIC_STALL)
+  {
+    ti.Log("Watchdog restart: no TIC frame for 2 min");
+  }
+  else if (rtc[1] == RESTART_REASON_MQTT_DOWN)
+  {
+    ti.Log("Watchdog restart: MQTT down for 3 min");
+  }
+  uint32_t cleared[2] = {0, 0};
+  ESP.rtcUserMemoryWrite(RTC_RESTART_REASON_OFFSET, cleared, sizeof(cleared));
 }
 
 void loop()
@@ -945,7 +992,7 @@ void loop()
     if (ti.frameSeen && millis() - ti.ts_lastFrame > TIC_STALL_RESTART_MS)
     {
       d->log("Plus de trame TIC\nRedemarrage", 1000);
-      ESP.restart();
+      restartWithReason(RESTART_REASON_TIC_STALL);
     }
 
     // MQTT watchdog: WiFi is up but the broker connection could not be restored
@@ -956,7 +1003,7 @@ void loop()
     else if (millis() - ts_mqtt_ok > MQTT_DOWN_RESTART_MS)
     {
       d->log("MQTT deconnecte\nRedemarrage", 1000);
-      ESP.restart();
+      restartWithReason(RESTART_REASON_MQTT_DOWN);
     }
 
     // diagnostics heartbeat
@@ -967,11 +1014,9 @@ void loop()
     }
     wifi_was_connected = wifi_connected;
 
-    if ((!status_sent_once && millis() > STATUS_FIRST_MS) || (status_sent_once && millis() - ts_status > STATUS_PERIOD_MS))
+    if ((long)(millis() - ts_status_due) >= 0)
     {
-      sendStatus();
-      ts_status = millis();
-      status_sent_once = true;
+      ts_status_due = millis() + (sendStatus() ? STATUS_PERIOD_MS : STATUS_RETRY_MS);
     }
   }
 

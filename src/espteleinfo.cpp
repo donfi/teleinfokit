@@ -26,6 +26,9 @@ ESPTeleInfo::ESPTeleInfo()
     ts_lastMqttConnectAttempt = 0;
     frameCount = 0;
     mqttReconnects = 0;
+    mqttDisconnects = 0;
+    mqttLastState = 0;
+    mqttWasConnected = false;
 }
 
 static void DataCallback(ValueList *me, uint8_t flags)
@@ -60,6 +63,8 @@ void ESPTeleInfo::init(_Mode_e tic_mode, bool triphase)
     Serial.flush();
     Serial.end();
 
+    // must be set before begin()
+    Serial.setRxBufferSize(TIC_RX_BUFFER_SIZE);
     Serial.begin(tic_mode == TINFO_MODE_HISTORIQUE ? 1200 : 9600, SERIAL_7E1);
     // Init teleinfo
     teleinfo.init(tic_mode);
@@ -85,6 +90,8 @@ void ESPTeleInfo::initMqtt(char *server, uint16_t port, char *username, char *pa
     delay_generic = period_data * 1000;
 
     mqttClient.setServer(server, port);
+    mqttClient.setKeepAlive(MQTT_KEEPALIVE_S);
+    mqttClient.setBufferSize(MQTT_BUFFER_SIZE);
 }
 
 bool ESPTeleInfo::connectMqtt()
@@ -333,6 +340,14 @@ void ESPTeleInfo::loop(void)
         }
     }
     mqttClient.loop();
+
+    bool mqttNowConnected = mqttClient.connected();
+    if (mqttWasConnected && !mqttNowConnected)
+    {
+        mqttDisconnects++;
+        mqttLastState = mqttClient.state();
+    }
+    mqttWasConnected = mqttNowConnected;
 }
 
 bool ESPTeleInfo::LogStartup()
@@ -516,7 +531,7 @@ void ESPTeleInfo::sendMqttDiscovery()
             sendMqttDiscoveryText(F("ISOUSC"), F("Intensité souscrite"));
         }
     }
-    mqttClient.setBufferSize(256);
+    mqttClient.setBufferSize(MQTT_BUFFER_SIZE);
 }
 
 void ESPTeleInfo::clearAllDiscovery()
